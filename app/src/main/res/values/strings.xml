@@ -27,7 +27,7 @@
     <string name="action_cancel">Cancelar</string>
     <string name="action_switch_camera">Trocar câmera</string>
     <string name="action_scan">Procurar SRT</string>
-    <string name="scan_support">Aceita faixa: 9900-9910</string>
+    <string name="scan_support">IP vazio varre a rede 9990-9999</string>
 
     <string name="setting_audio">Enviar áudio do microfone</string>
     <string name="setting_audio_desc">AAC mono 96 kbps junto com o vídeo</string>

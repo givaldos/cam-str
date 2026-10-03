@@ -31,7 +31,10 @@ em Wi-Fi: sempre há codificação H.264 + rede + decodificação no caminho.
 3. No app, escolha a qualidade (padrão **1080p30 Estável**), digite o
    **IP do PC**, confira porta (9998), latência (120) e bitrate
    (8 Mbps). Sem saber a porta? Digite o IP e toque em **Procurar
-   SRT** (o campo porta aceita faixa, ex. `9900-9910`). Toque em
+   SRT** (o campo porta aceita faixa, ex. `9900-9910`). Sem saber o
+   IP (ex. Mac com compartilhamento de rede)? Deixe o IP vazio e
+   toque em **Procurar SRT**: o app varre a rede local em IPv4 e
+   IPv6 nas portas 9990-9999 e lista o que achar. Toque em
    **Iniciar**.
 4. O vídeo aparece no OBS em poucos segundos. **Trocar câmera** alterna entre
    traseira e frontal sem derrubar a conexão.
@@ -88,9 +91,19 @@ Do maior para o menor corte de consumo:
 - Travou ou atrasou: baixe o bitrate para 6 ou 4 Mbps, ou suba a latência SRT
   para 200 ms no app e no OBS (os dois lados precisam do mesmo valor).
 - Libere a porta no firewall do PC se o OBS não receber nada.
-- A procura lista portas UDP candidatas (SRT não responde sonda sem
-  handshake, então o teste é por eliminação de ICMP). Se achar mais de
-  uma, confirme qual é o listener do OBS.
+- IPv6: a procura acha o listener em IPv4 e IPv6, e a transmissão
+  funciona nos dois. Como a biblioteca SRT só disca IPv4, alvo só
+  IPv6 passa por um relay UDP local automático (o status mostra
+  "Transmitindo via IPv6"). No OBS, listener IPv6 usa `srt://[::]:9998?mode=listener&latency=120`
+  em vez de `0.0.0.0`.
+- A procura primeiro lista portas UDP candidatas por eliminação de
+  ICMP, depois confirma cada uma com um handshake SRT de verdade e
+  mostra só quem responde como SRT (sem duplicadas de porta
+  filtrada). Com o IP vazio ela vira
+  sniff de rede: testa quem está vivo no /24 e sonda IPv4 e IPv6
+  (gateway, DNS e vizinhos, onde o Mac aparece) nas portas
+  9990-9999; varrer IPv6 por força bruta é inviável, por isso o app
+  sonda os endereços conhecidos em vez do espaço todo.
 
 ## Compilar
 

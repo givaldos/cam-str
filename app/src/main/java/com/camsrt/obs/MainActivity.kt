@@ -9,13 +9,13 @@ import android.hardware.camera2.CameraManager
 import android.media.AudioFormat
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.net.wifi.WifiManager
+import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
-import android.text.format.Formatter
 import android.util.Size
 import android.content.res.ColorStateList
 import android.view.WindowManager
@@ -61,7 +61,28 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.random.Random
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.util.concurrent.TimeUnit
+
+private const val SCAN_CONCURRENCY = 64
+private const val LIVENESS_PORT = 59999
+private const val LIVENESS_TIMEOUT_MS = 350
+private const val SWEEP_PROBE_TIMEOUT_MS = 300
+private const val HOST_PROBE_TIMEOUT_MS = 350
+private const val CONFIRM_TIMEOUT_MS = 600
+private const val CONFIRM_ATTEMPTS = 2
+private const val MAX_SNIFF_TARGETS = 600
 
 /**
  * CamSRT endurecido para lives longas (2h+ sem travar).
@@ -79,13 +100,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  *   onPause; BACK com live no ar só minimiza, não derruba).
  * - Retrato e paisagem, preview fullscreen, orientação travada
  *   durante a live. Modo economia (720p30, teto 4M, Wi-Fi econômico).
- * - Procura de SRT por porta/faixa, estado visual persistido,
+ * - Procura de SRT por porta/faixa, sniff da rede com IP vazio
+ *   (IPv4 + IPv6, portas 9990-9999), estado visual persistido,
  *   inputs travados no ar e guarda contra toque duplo no Iniciar.
  */
 class MainActivity : ComponentActivity() {
 
     private data class Quality(
         val label: String,
+        val desc: String?,
         val size: Size,
         val fps: Int,
         val defaultBitrateMbps: Int
@@ -94,10 +117,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private val qualities = listOf(
-        Quality("1080p30 Estável (recomendado 2h)", Size(1920, 1080), 30, 8),
-        Quality("720p30 Leve (rede fraca / menos calor)", Size(1280, 720), 30, 4),
-        Quality("720p60 Médio", Size(1280, 720), 60, 6),
-        Quality("1080p60 Alto (esquenta mais)", Size(1920, 1080), 60, 12)
+        Quality("1080p30 Estável", "Recomendado para 2h", Size(1920, 1080), 30, 8),
+        Quality("720p30 Leve", "Rede fraca, menos calor", Size(1280, 720), 30, 4),
+        Quality("720p60 Médio", "60 fps, calor médio", Size(1280, 720), 60, 6),
+        Quality("1080p60 Alto", "Esquenta mais", Size(1920, 1080), 60, 12)
     )
 
     private lateinit var preview: PreviewView
@@ -163,7 +186,11 @@ class MainActivity : ComponentActivity() {
     private var savedContainerHeight = 0
     private var qualityPosition = 0
     private var economyMode = false
-    private var lastDescriptor: SrtMediaDescriptor? = null
+    private data class StreamTarget(val host: String, val port: Int, val latency: Int)
+
+    private var lastTarget: StreamTarget? = null
+    private var activeRelay: SrtRelay? = null
+    private var relayedNow = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -219,7 +246,8 @@ class MainActivity : ComponentActivity() {
         restoreFields()
         setupQualityDropdown()
 
-        localIpText.text = "IP deste celular: ${deviceIp()} (informe no app o IP do PC)"
+        localIpText.text =
+            "IP deste celular: ${deviceIp()} (IP do PC vazio varre a rede)"
         startButton.setOnClickListener { startStream() }
         stopButton.setOnClickListener { stopStream() }
         switchButton.setOnClickListener { switchCamera() }
@@ -258,7 +286,43 @@ class MainActivity : ComponentActivity() {
 
     private fun setupQualityDropdown() {
         // Menu suspenso M3 (sem filtro: inputType=none, posição = índice).
-        val adapter = ArrayAdapter(this, R.layout.list_item_dropdown, qualities)
+        // Linha do menu em 2 linhas (título + detalhe pequeno); o campo
+        // mostra só o título curto para não quebrar o layout.
+        val adapter = object : ArrayAdapter<Quality>(
+            this, R.layout.list_item_dropdown_selected, qualities
+        ) {
+            override fun getView(
+                position: Int,
+                convertView: android.view.View?,
+                parent: android.view.ViewGroup
+            ): android.view.View {
+                val v = convertView ?: layoutInflater.inflate(
+                    R.layout.list_item_dropdown_selected, parent, false
+                )
+                (v as TextView).text = getItem(position)?.label
+                return v
+            }
+
+            override fun getDropDownView(
+                position: Int,
+                convertView: android.view.View?,
+                parent: android.view.ViewGroup
+            ): android.view.View {
+                val v = convertView ?: layoutInflater.inflate(
+                    R.layout.list_item_dropdown, parent, false
+                )
+                val q = getItem(position)
+                v.findViewById<TextView>(R.id.dropdownTitle).text = q?.label
+                val desc = v.findViewById<TextView>(R.id.dropdownDesc)
+                if (q?.desc.isNullOrEmpty()) {
+                    desc.visibility = android.view.View.GONE
+                } else {
+                    desc.visibility = android.view.View.VISIBLE
+                    desc.text = q?.desc
+                }
+                return v
+            }
+        }
         qualityInput.setAdapter(adapter)
         qualityPosition = prefs.getInt("quality", 0).coerceIn(qualities.indices)
         qualityInput.setText(qualities[qualityPosition].label, false)
@@ -372,19 +436,29 @@ class MainActivity : ComponentActivity() {
 
     // ---------- Procura de SRT na rede ----------
 
+    private data class SniffTarget(val label: String, val addr: InetAddress)
+
     /**
-     * Procura ouvintes SRT no IP digitado. SRT roda sobre UDP, que não
+     * Com IP digitado, sonda só aquele host (todos os endereços IPv4 e
+     * IPv6 que o nome resolver). Com o campo vazio, varre a rede local:
+     * o /24 de cada IPv4 próprio mais os candidatos IPv6 (gateway, DNS
+     * e vizinhos), nas portas 9990-9999. SRT roda sobre UDP, que não
      * tem handshake de "porta aberta": a sonda envia 1 byte e observa.
      * Porta que responde com erro ICMP (PortUnreachable) está fechada;
-     * as demais são candidatas (abertas ou filtradas) e entram na lista.
+     * as demais são candidatas e passam por confirmação de handshake
+     * SRT, que lista só quem responde como SRT de verdade.
      */
     private fun scanSrtPorts() {
+        if (scanJob?.isActive == true) return
         val host = hostInput.text.toString().trim()
         if (host.isEmpty()) {
-            setStatus("Informe o IP do PC para procurar")
-            return
+            scanNetwork()
+        } else {
+            scanHost(host)
         }
-        if (scanJob?.isActive == true) return
+    }
+
+    private fun scanHost(host: String) {
         val ports = parseScanPorts(portInput.text.toString().trim())
         if (ports.isEmpty()) {
             setStatus("Nada para procurar")
@@ -395,23 +469,168 @@ class MainActivity : ComponentActivity() {
         scanButton.isEnabled = false
         scanJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val found = ports.map { port ->
-                    async { port to udpProbe(host, port) }
-                }.awaitAll().filter { it.second }.map { it.first }.sorted()
-                runOnUiThread {
-                    if (!isStreaming && !connecting) scanButton.isEnabled = true
-                    if (found.isEmpty()) {
+                val bare = SrtPorts.bareHost(host)
+                val addrs = try {
+                    InetAddress.getAllByName(bare).toList()
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+                if (addrs.isEmpty()) {
+                    runOnUiThread {
+                        if (!isStreaming && !connecting) scanButton.isEnabled = true
+                        setStatusIfLatest(seq, "Não resolveu $host. Confira o IP ou nome.")
+                    }
+                    return@launch
+                }
+                val sem = Semaphore(SCAN_CONCURRENCY)
+                val candidates = ports.map { port ->
+                    async {
+                        sem.withPermit {
+                            port.takeIf { p ->
+                                addrs.any { udpProbeAddress(it, p, HOST_PROBE_TIMEOUT_MS) }
+                            }
+                        }
+                    }
+                }.awaitAll().filterNotNull().sorted()
+                if (candidates.isEmpty()) {
+                    runOnUiThread {
+                        if (!isStreaming && !connecting) scanButton.isEnabled = true
                         setStatusIfLatest(
                             seq,
                             "Nenhum SRT achado em $host. Confira o IP e a " +
                                 "porta listener no OBS."
                         )
+                    }
+                    return@launch
+                }
+                runOnUiThread { setStatusIfLatest(seq, "Confirmando SRT…") }
+                val confirmed = candidates.map { port ->
+                    async {
+                        sem.withPermit {
+                            port.takeIf { p -> addrs.any { confirmSrt(it, p) } }
+                        }
+                    }
+                }.awaitAll().filterNotNull().sorted()
+                runOnUiThread {
+                    if (!isStreaming && !connecting) scanButton.isEnabled = true
+                    if (confirmed.isNotEmpty()) {
+                        setStatusIfLatest(
+                            seq,
+                            "SRT confirmado: ${confirmed.joinToString()} " +
+                                "(toque para usar)."
+                        )
+                        if (seq == statusSeq) {
+                            showScanResults(confirmed.map { bare to it })
+                        }
                     } else {
                         setStatusIfLatest(
                             seq,
-                            "Achados: ${found.joinToString()} (toque para usar)."
+                            "Sem resposta SRT; candidatos UDP: " +
+                                "${candidates.joinToString()} (toque para usar)."
                         )
-                        if (seq == statusSeq) showScanResults(host, found)
+                        if (seq == statusSeq) {
+                            showScanResults(candidates.map { bare to it })
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                runOnUiThread {
+                    if (!isStreaming && !connecting) scanButton.isEnabled = true
+                    setStatusIfLatest(seq, "Falha na procura.")
+                }
+            }
+        }
+    }
+
+    /**
+     * Sniff da rede local. Primeiro testa quem está vivo com 1 sonda
+     * UDP numa porta fechada (host vivo devolve ICMP PortUnreachable;
+     * morto some, senão todo endereço morto viraria falso positivo).
+     * Depois sonda as portas SRT só nos vivos, em IPv4 e IPv6.
+     */
+    private fun scanNetwork() {
+        val ports = SrtPorts.parseNetworkScanPorts(portInput.text.toString().trim())
+        if (ports.isEmpty()) {
+            setStatus("Nada para procurar")
+            return
+        }
+        val seq = ++statusSeq
+        setStatus("Varrendo a rede (${ports.size} portas)…")
+        scanButton.isEnabled = false
+        scanJob = lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val targets = collectSniffTargets()
+                if (targets.isEmpty()) {
+                    runOnUiThread {
+                        if (!isStreaming && !connecting) scanButton.isEnabled = true
+                        setStatusIfLatest(
+                            seq, "Sem rede local para varrer. Confira o Wi-Fi."
+                        )
+                    }
+                    return@launch
+                }
+                runOnUiThread {
+                    setStatusIfLatest(seq, "Varrendo ${targets.size} endereços…")
+                }
+                val sem = Semaphore(SCAN_CONCURRENCY)
+                val alive = targets.map { t ->
+                    async {
+                        sem.withPermit { t.takeIf { udpLiveness(it.addr) } }
+                    }
+                }.awaitAll().filterNotNull()
+                if (alive.isEmpty()) {
+                    runOnUiThread {
+                        if (!isStreaming && !connecting) scanButton.isEnabled = true
+                        setStatusIfLatest(
+                            seq, "Nenhum aparelho respondeu na rede Wi-Fi."
+                        )
+                    }
+                    return@launch
+                }
+                val candidates = alive.flatMap { t -> ports.map { p -> t to p } }.map { (t, p) ->
+                    async {
+                        sem.withPermit {
+                            (t to p).takeIf { udpProbeAddress(t.addr, p, SWEEP_PROBE_TIMEOUT_MS) }
+                        }
+                    }
+                }.awaitAll().filterNotNull()
+                    .sortedWith(compareBy({ it.first.label }, { it.second }))
+                if (candidates.isEmpty()) {
+                    runOnUiThread {
+                        if (!isStreaming && !connecting) scanButton.isEnabled = true
+                        setStatusIfLatest(
+                            seq,
+                            "Nenhum SRT achado na rede. Confira o listener no OBS."
+                        )
+                    }
+                    return@launch
+                }
+                runOnUiThread { setStatusIfLatest(seq, "Confirmando SRT…") }
+                val confirmed = candidates.map { (t, p) ->
+                    async {
+                        sem.withPermit {
+                            (t to p).takeIf { confirmSrt(t.addr, p) }
+                        }
+                    }
+                }.awaitAll().filterNotNull()
+                runOnUiThread {
+                    if (!isStreaming && !connecting) scanButton.isEnabled = true
+                    if (confirmed.isNotEmpty()) {
+                        setStatusIfLatest(
+                            seq, "Achados ${confirmed.size} SRT (toque para usar)."
+                        )
+                        if (seq == statusSeq) {
+                            showScanResults(confirmed.map { it.first.label to it.second })
+                        }
+                    } else {
+                        setStatusIfLatest(
+                            seq,
+                            "Sem resposta SRT; ${candidates.size} candidatos " +
+                                "UDP (toque para usar)."
+                        )
+                        if (seq == statusSeq) {
+                            showScanResults(candidates.map { it.first.label to it.second })
+                        }
                     }
                 }
             } catch (_: Throwable) {
@@ -425,16 +644,24 @@ class MainActivity : ComponentActivity() {
 
     private fun parseScanPorts(text: String): List<Int> = SrtPorts.parseScanPorts(text)
 
-    private fun udpProbe(host: String, port: Int): Boolean {
-        var socket: java.net.DatagramSocket? = null
+    private fun socketFor(addr: InetAddress): DatagramSocket =
+        if (addr is Inet6Address) {
+            DatagramSocket(InetSocketAddress(InetAddress.getByName("::"), 0))
+        } else {
+            DatagramSocket()
+        }
+
+    /** Sonda UDP: timeout ou dado = candidata; ICMP fechada = não. */
+    private fun udpProbeAddress(addr: InetAddress, port: Int, timeoutMs: Int): Boolean {
+        var socket: DatagramSocket? = null
         return try {
-            socket = java.net.DatagramSocket()
-            socket.soTimeout = 350
-            socket.connect(java.net.InetSocketAddress(host, port))
-            socket.send(java.net.DatagramPacket(ByteArray(1), 1))
+            socket = socketFor(addr)
+            socket.soTimeout = timeoutMs
+            socket.connect(InetSocketAddress(addr, port))
+            socket.send(DatagramPacket(ByteArray(1), 1))
             try {
                 val buf = ByteArray(64)
-                socket.receive(java.net.DatagramPacket(buf, buf.size))
+                socket.receive(DatagramPacket(buf, buf.size))
                 true
             } catch (_: java.net.SocketTimeoutException) {
                 true
@@ -453,14 +680,322 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun showScanResults(host: String, ports: List<Int>) {
-        val items = ports.map { "$host:$it" }.toTypedArray()
+    /**
+     * Confirma SRT de verdade: envia pedido de handshake e exige
+     * resposta ecoando ISN e socket id com cookie não zero. Elimina
+     * as duplicadas de porta filtrada, que passam na sonda UDP.
+     */
+    private fun confirmSrt(addr: InetAddress, port: Int): Boolean {
+        val isn = Random.nextInt(0, Int.MAX_VALUE)
+        val sid = Random.nextInt(1, Int.MAX_VALUE)
+        val probe = SrtHandshake.buildProbe(
+            isn, sid, (SystemClock.elapsedRealtime() and 0xFFFFFFFFL).toInt()
+        )
+        var socket: DatagramSocket? = null
+        return try {
+            socket = socketFor(addr)
+            socket.soTimeout = CONFIRM_TIMEOUT_MS
+            socket.connect(InetSocketAddress(addr, port))
+            repeat(CONFIRM_ATTEMPTS) {
+                try {
+                    socket.send(DatagramPacket(probe, probe.size))
+                    val buf = ByteArray(512)
+                    val pkt = DatagramPacket(buf, buf.size)
+                    socket.receive(pkt)
+                    if (SrtHandshake.isHandshakeReply(buf, pkt.length, isn, sid)) return true
+                } catch (_: java.net.SocketTimeoutException) {
+                    // sem resposta: tenta de novo
+                } catch (_: java.net.PortUnreachableException) {
+                    return false
+                }
+            }
+            false
+        } catch (_: java.net.PortUnreachableException) {
+            false
+        } catch (_: Throwable) {
+            false
+        } finally {
+            try {
+                socket?.close()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /** Host vivo devolve ICMP numa porta fechada; morto não responde. */
+    private fun udpLiveness(addr: InetAddress): Boolean {
+        var socket: DatagramSocket? = null
+        return try {
+            socket = socketFor(addr)
+            socket.soTimeout = LIVENESS_TIMEOUT_MS
+            socket.connect(InetSocketAddress(addr, LIVENESS_PORT))
+            socket.send(DatagramPacket(ByteArray(1), 1))
+            try {
+                val buf = ByteArray(64)
+                socket.receive(DatagramPacket(buf, buf.size))
+                true
+            } catch (_: java.net.SocketTimeoutException) {
+                false
+            } catch (_: java.net.PortUnreachableException) {
+                true
+            }
+        } catch (_: java.net.PortUnreachableException) {
+            true
+        } catch (_: Throwable) {
+            false
+        } finally {
+            try {
+                socket?.close()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /**
+     * Link-local (fe80::/10) sem escopo não roteia: amarra o endereço
+     * à interface Wi-Fi para a sonda sair pela rede certa.
+     */
+    private fun withScope(addr: InetAddress): InetAddress {
+        if (addr !is Inet6Address) return addr
+        if (!addr.isLinkLocalAddress || addr.scopeId != 0) return addr
+        return try {
+            val nif = outboundInterface() ?: linkLocalInterface()
+            if (nif != null) Inet6Address.getByAddress(null, addr.address, nif) else addr
+        } catch (_: Throwable) {
+            addr
+        }
+    }
+
+    /** Interface da rede ativa (o Wi-Fi, não os dados móveis). */
+    private fun outboundInterface(): NetworkInterface? {
+        return try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            val name = try {
+                cm.getLinkProperties(cm.activeNetwork)?.interfaceName
+            } catch (_: Throwable) {
+                null
+            }
+            if (name != null) {
+                try {
+                    NetworkInterface.getByName(name)
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Reserva: interface com link-local, preferindo Wi-Fi e cabo. */
+    private fun linkLocalInterface(): NetworkInterface? {
+        return try {
+            val ifs = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                .filter { n ->
+                    try {
+                        n.isUp && !n.isLoopback
+                    } catch (_: Throwable) {
+                        false
+                    }
+                }
+            fun score(n: NetworkInterface): Int {
+                val name = try {
+                    n.name
+                } catch (_: Throwable) {
+                    ""
+                }
+                return SrtPorts.interfaceNameScore(name)
+            }
+            ifs.filter { n ->
+                try {
+                    n.inetAddresses.toList().any {
+                        it is Inet6Address && it.isLinkLocalAddress
+                    }
+                } catch (_: Throwable) {
+                    false
+                }
+            }.minByOrNull(::score) ?: ifs.minByOrNull(::score)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun linkPropertiesList(): List<LinkProperties> {
+        return try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            val out = mutableListOf<LinkProperties>()
+            try {
+                cm.getLinkProperties(cm.activeNetwork)?.let { out += it }
+            } catch (_: Throwable) {
+            }
+            try {
+                for (n in cm.allNetworks) {
+                    try {
+                        cm.getLinkProperties(n)?.let { out += it }
+                    } catch (_: Throwable) {
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+            out
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /** Vizinhos IPv4 com ARP resolvido (o Mac aparece aqui). */
+    private fun readArpTable(): List<String> {
+        return try {
+            java.io.File("/proc/net/arp").readLines().drop(1).mapNotNull { line ->
+                val cols = line.trim().split(Regex("\\s+"))
+                if (cols.size < 6) return@mapNotNull null
+                if (cols[5] == "lo" || cols[2] == "0x0") return@mapNotNull null
+                cols[0].takeIf { it.contains('.') }
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /** Vizinhos IPv4/IPv6 do cache do sistema (best-effort). */
+    private fun readIpNeigh(): List<String> {
+        return try {
+            val proc = try {
+                ProcessBuilder("ip", "neigh", "show")
+                    .redirectErrorStream(true).start()
+            } catch (_: Throwable) {
+                ProcessBuilder("/system/bin/ip", "neigh", "show")
+                    .redirectErrorStream(true).start()
+            }
+            if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+                try {
+                    proc.destroy()
+                } catch (_: Throwable) {
+                }
+                return emptyList()
+            }
+            proc.inputStream.bufferedReader().readLines().mapNotNull { line ->
+                if (line.contains("FAILED")) return@mapNotNull null
+                val ip = line.trim().split(Regex("\\s+")).firstOrNull()
+                    ?: return@mapNotNull null
+                ip.takeIf { it.contains('.') || it.contains(':') }
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Alvos do sniff: o /24 de cada IPv4 local privado (é onde o
+     * compartilhamento do Mac coloca o celular) mais gateway, DNS e
+     * vizinhos, que é onde o IPv6 do Mac aparece (varrer IPv6 na força
+     * bruta é inviável: o espaço é grande demais).
+     */
+    private fun collectSniffTargets(): List<SniffTarget> {
+        val targets = LinkedHashMap<String, SniffTarget>()
+        val ownKeys = mutableSetOf<String>()
+        fun keyOf(label: String) = label.substringBefore('%').lowercase()
+        fun addAddr(a0: InetAddress) {
+            var addr = a0
+            if (addr.isLoopbackAddress || addr.isMulticastAddress ||
+                addr.isAnyLocalAddress
+            ) {
+                return
+            }
+            addr = withScope(addr)
+            val label = try {
+                addr.hostAddress ?: return
+            } catch (_: Throwable) {
+                return
+            }
+            val key = keyOf(label)
+            if (!targets.containsKey(key)) targets[key] = SniffTarget(label, addr)
+        }
+        fun add(s: String) {
+            try {
+                addAddr(InetAddress.getByName(SrtPorts.bareHost(s)))
+            } catch (_: Throwable) {
+            }
+        }
+        val ownV4 = mutableListOf<String>()
+        try {
+            for (lp in linkPropertiesList()) {
+                for (la in lp.linkAddresses) {
+                    val a = la.address ?: continue
+                    if (a.isLoopbackAddress) continue
+                    try {
+                        a.hostAddress?.let { ownKeys += keyOf(it) }
+                    } catch (_: Throwable) {
+                    }
+                    if (a is Inet4Address) {
+                        try {
+                            a.hostAddress?.let { ownV4 += it }
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }
+                for (r in lp.routes) {
+                    try {
+                        r.gateway?.let { addAddr(it) }
+                    } catch (_: Throwable) {
+                    }
+                }
+                for (d in lp.dnsServers) {
+                    try {
+                        addAddr(d)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        if (ownV4.isEmpty()) {
+            try {
+                val ifs = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                for (nif in ifs) {
+                    try {
+                        if (!nif.isUp || nif.isLoopback) continue
+                    } catch (_: Throwable) {
+                        continue
+                    }
+                    for (addr in nif.inetAddresses.toList()) {
+                        if (addr.isLoopbackAddress) continue
+                        try {
+                            addr.hostAddress?.let { ownKeys += keyOf(it) }
+                        } catch (_: Throwable) {
+                        }
+                        if (addr is Inet4Address) {
+                            try {
+                                addr.hostAddress?.let { ownV4 += it }
+                            } catch (_: Throwable) {
+                            }
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        for (v4 in ownV4.distinct()) {
+            if (SrtPorts.isSweepableIpv4(v4)) {
+                for (h in SrtPorts.ipv4SweepHosts(v4)) add(h)
+            }
+        }
+        for (n in (readArpTable() + readIpNeigh()).distinct()) add(n)
+        return targets.values.filter { keyOf(it.label) !in ownKeys }.take(MAX_SNIFF_TARGETS)
+    }
+
+    private fun showScanResults(results: List<Pair<String, Int>>) {
+        val items = results.map { (h, p) -> "${SrtPorts.formatSrtHost(h)}:$p" }.toTypedArray()
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.dialog_scan_title)
             .setItems(items) { _, which ->
-                portInput.setText(ports[which].toString())
+                val (h, p) = results[which]
+                hostInput.setText(h)
+                portInput.setText(p.toString())
                 saveFields()
-                setStatus("Porta ${ports[which]} selecionada. Toque em Iniciar.")
+                setStatus("Selecionado ${items[which]}. Toque em Iniciar.")
             }
             .setNegativeButton(R.string.dialog_close, null)
             .show()
@@ -673,13 +1208,12 @@ class MainActivity : ComponentActivity() {
         reconnectAttempt = 0
         userMaxBitrate = bitrateMbps * 1_000_000
         thermalCeiling = 0
-        val descriptor =
-            SrtMediaDescriptor("srt://$host:$port?latency=$latency&connect_timeout=15000")
-        lastDescriptor = descriptor
-        connectNow(s, descriptor, effectiveCeiling())
+        val target = StreamTarget(host, port, latency)
+        lastTarget = target
+        connectNow(s, target, effectiveCeiling())
     }
 
-    private fun connectNow(s: SingleStreamer, descriptor: SrtMediaDescriptor, maxBitrate: Int) {
+    private fun connectNow(s: SingleStreamer, target: StreamTarget, maxBitrate: Int) {
         val seq = ++statusSeq
         connecting = true
         updateStreamButtons()
@@ -710,6 +1244,15 @@ class MainActivity : ComponentActivity() {
                 // mudaria o enquadramento do stream.
                 requestedOrientation =
                     android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
+                stopRelay()
+                // Resolve e sobe relay (se preciso) fora da main thread.
+                val (descriptor, relayed) = withContext(Dispatchers.IO) {
+                    buildRoutedDescriptor(target)
+                }
+                relayedNow = relayed
+                setStatusIfLatest(
+                    seq, if (relayed) "Conectando via IPv6…" else "Conectando…"
+                )
                 s.startStream(descriptor)
                 if (userStopped) {
                     // Cancelado no meio do handshake: garante parado.
@@ -729,10 +1272,14 @@ class MainActivity : ComponentActivity() {
                 )
                 streamStartRealtime = SystemClock.elapsedRealtime()
                 startStats()
-                setStatusIfLatest(seq, "Transmitindo…")
+                setStatusIfLatest(seq, streamingStatus())
             } catch (t: Throwable) {
-                if (t is kotlin.coroutines.cancellation.CancellationException) throw t
+                if (t is kotlin.coroutines.cancellation.CancellationException) {
+                    stopRelay()
+                    throw t
+                }
                 connecting = false
+                stopRelay()
                 runOnUiThread {
                     if (!userStopped) {
                         scheduleReconnect("Falha ao iniciar: ${t.message}")
@@ -745,6 +1292,47 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * Descritor efetivo da tentativa: direto quando há IPv4; via relay
+     * local (127.0.0.1) quando o alvo é só IPv6, que a biblioteca SRT
+     * não disca. Roda fora da main thread (resolve DNS e binda porta).
+     */
+    private fun buildRoutedDescriptor(t: StreamTarget): Pair<SrtMediaDescriptor, Boolean> {
+        return when (val route = SrtPorts.routeFor(t.host)) {
+            is SrtPorts.StreamRoute.Direct -> Pair(
+                SrtMediaDescriptor(
+                    "srt://${SrtPorts.formatSrtHost(route.hostForUrl)}:${t.port}" +
+                        "?latency=${t.latency}&connect_timeout=15000"
+                ),
+                false
+            )
+
+            is SrtPorts.StreamRoute.Relay -> {
+                val relay = SrtRelay(InetSocketAddress(withScope(route.addr), t.port))
+                val localPort = relay.start()
+                activeRelay = relay
+                Pair(
+                    SrtMediaDescriptor(
+                        "srt://127.0.0.1:$localPort?latency=${t.latency}&connect_timeout=15000"
+                    ),
+                    true
+                )
+            }
+        }
+    }
+
+    private fun stopRelay() {
+        try {
+            activeRelay?.stop()
+        } catch (_: Throwable) {
+        }
+        activeRelay = null
+        relayedNow = false
+    }
+
+    private fun streamingStatus(): String =
+        if (relayedNow) "Transmitindo via IPv6…" else "Transmitindo…"
 
     private fun applyRegulator(s: SingleStreamer, maxBitrate: Int) {
         try {
@@ -781,6 +1369,7 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread { setStatusIfLatest(seq, "Falha ao parar: ${t.message}") }
             } finally {
                 StreamKeepAliveService.stop(this@MainActivity)
+                stopRelay()
                 runOnUiThread {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     requestedOrientation =
@@ -807,12 +1396,13 @@ class MainActivity : ComponentActivity() {
     private fun scheduleReconnect(reason: String) {
         if (userStopped) return
         val s = streamer ?: return
-        val descriptor = lastDescriptor ?: return
+        val target = lastTarget ?: return
         reconnectJob?.cancel()
         reconnectAttempt++
         if (reconnectAttempt > 240) {
             // ~2h de tentativas com teto de 30s: desiste e avisa.
             connecting = false
+            stopRelay()
             setStatus("Sem conexão após muitas tentativas. Toque em Iniciar.")
             updateStreamButtons()
             setInputsEnabled(true)
@@ -836,7 +1426,7 @@ class MainActivity : ComponentActivity() {
                 withTimeoutOrNull(4000) { s.stopStream() }
             } catch (_: Throwable) {
             }
-            connectNow(s, descriptor, effectiveCeiling())
+            connectNow(s, target, effectiveCeiling())
         }
         updateStreamButtons() // garante Cancelar durante a espera
     }
@@ -1107,7 +1697,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 s.setVideoSource(CameraSourceFactory(cameraIds[cameraIndex]))
-                setStatusIfLatest(seq, if (isStreaming) "Transmitindo…" else "Câmera alternada")
+                setStatusIfLatest(seq, if (isStreaming) streamingStatus() else "Câmera alternada")
             } catch (t: Throwable) {
                 runOnUiThread { setStatusIfLatest(seq, "Falha ao trocar câmera: ${t.message}") }
             }
@@ -1125,11 +1715,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Suppress("DEPRECATION")
+    /** IPs do aparelho (IPv4 + IPv6), sem precisar de permissão extra. */
     private fun deviceIp(): String {
         return try {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            Formatter.formatIpAddress(wm.connectionInfo.ipAddress)
+            var v4: String? = null
+            var v6: String? = null
+            var v6Link: String? = null
+            val ifs = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            for (nif in ifs) {
+                try {
+                    if (!nif.isUp || nif.isLoopback) continue
+                } catch (_: Throwable) {
+                    continue
+                }
+                for (addr in nif.inetAddresses.toList()) {
+                    if (addr.isLoopbackAddress || addr.isMulticastAddress) continue
+                    when {
+                        addr is Inet4Address && v4 == null -> v4 = addr.hostAddress
+                        addr is Inet6Address && !addr.isLinkLocalAddress && v6 == null ->
+                            v6 = addr.hostAddress?.substringBefore('%')
+
+                        addr is Inet6Address && addr.isLinkLocalAddress && v6Link == null ->
+                            v6Link = addr.hostAddress?.substringBefore('%')
+                    }
+                }
+            }
+            listOfNotNull(v4, v6 ?: v6Link).joinToString(" • ").ifEmpty { "desconhecido" }
         } catch (_: Exception) {
             "desconhecido"
         }
@@ -1164,6 +1775,7 @@ class MainActivity : ComponentActivity() {
         collectJob?.cancel()
         scanJob?.cancel()
         saveFields()
+        stopRelay()
         try {
             StreamKeepAliveService.stop(this)
         } catch (_: Throwable) {
@@ -1191,7 +1803,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         // Rede de segurança: se a live estava armada e caiu enquanto o
         // app estava fora da frente, retoma sozinho ao voltar.
-        if (!userStopped && lastDescriptor != null && !isStreaming && streamer != null) {
+        if (!userStopped && lastTarget != null && !isStreaming && streamer != null) {
             scheduleReconnect("Retomando transmissão")
         }
     }
