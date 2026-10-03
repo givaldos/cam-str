@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#101418</color>
+
+    <!-- Esquema claro. Primário azul, terciário verde (economia/ok),
+         vermelho reservado para REC/parar/erro. -->
+    <color name="md_primary">#0B57D0</color>
+    <color name="md_on_primary">#FFFFFF</color>
+    <color name="md_primary_container">#D3E3FD</color>
+    <color name="md_on_primary_container">#041E49</color>
+    <color name="md_secondary">#565E71</color>
+    <color name="md_on_secondary">#FFFFFF</color>
+    <color name="md_secondary_container">#DAE2F9</color>
+    <color name="md_on_secondary_container">#131C2B</color>
+    <color name="md_tertiary">#146C2E</color>
+    <color name="md_on_tertiary">#FFFFFF</color>
+    <color name="md_tertiary_container">#C4EED0</color>
+    <color name="md_on_tertiary_container">#072711</color>
+    <color name="md_error">#BA1A1A</color>
+    <color name="md_on_error">#FFFFFF</color>
+    <color name="md_error_container">#FFDAD6</color>
+    <color name="md_on_error_container">#410002</color>
+</resources>

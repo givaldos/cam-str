@@ -1,0 +1,37 @@
+# Gradle / Android build
+.gradle/
+build/
+*/build/
+out/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Local config (SDK path, chaves)
+local.properties
+*.jks
+*.keystore
+*.p12
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Arquivos temporarios e do SO
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Node (se usar tooling JS)
+node_modules/

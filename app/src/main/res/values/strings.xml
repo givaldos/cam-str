@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CamSRT</string>
+    <string name="app_subtitle">Celular como câmera do OBS via SRT</string>
+
+    <string name="section_status">Estado</string>
+    <string name="section_connection">Conexão com o PC</string>
+    <string name="section_stream">Transmissão</string>
+    <string name="section_battery">Bateria e tela</string>
+    <string name="section_help">Como ligar no OBS</string>
+
+    <string name="chip_live">AO VIVO</string>
+    <string name="chip_idle">Parado</string>
+    <string name="status_stopped">Parado</string>
+
+    <string name="label_host">IP do PC com OBS</string>
+    <string name="hint_host">Ex. 192.168.0.10</string>
+    <string name="label_port">Porta</string>
+    <string name="hint_port">9998 ou 9900-9910</string>
+    <string name="label_latency">Latência SRT (ms)</string>
+    <string name="label_bitrate">Bitrate (Mbps)</string>
+    <string name="label_quality">Qualidade</string>
+    <string name="error_host_required">Informe o IP do PC com OBS</string>
+
+    <string name="action_start">Iniciar</string>
+    <string name="action_stop">Parar</string>
+    <string name="action_cancel">Cancelar</string>
+    <string name="action_switch_camera">Trocar câmera</string>
+    <string name="action_scan">Procurar SRT</string>
+    <string name="scan_support">Aceita faixa: 9900-9910</string>
+
+    <string name="setting_audio">Enviar áudio do microfone</string>
+    <string name="setting_audio_desc">AAC mono 96 kbps junto com o vídeo</string>
+    <string name="setting_preview">Preview na tela</string>
+    <string name="setting_preview_desc">Desligar economiza bateria e esquenta menos</string>
+    <string name="setting_dim">Tela escura</string>
+    <string name="setting_dim_desc">Brilho mínimo durante a transmissão</string>
+    <string name="setting_economy">Modo economia</string>
+    <string name="setting_economy_desc">720p30, teto 4 Mbps, sem preview e tela escura</string>
+
+    <string name="action_background_allow">Permitir em 2º plano</string>
+    <string name="action_background_ok">2º plano: OK</string>
+    <string name="background_desc">Evita que o Android mate a live longa</string>
+
+    <string name="desc_fullscreen_enter">Ampliar preview</string>
+    <string name="desc_fullscreen_exit">Sair do preview ampliado</string>
+
+    <string name="dialog_scan_title">SRT achados (toque para usar)</string>
+    <string name="dialog_close">Fechar</string>
+
+    <string name="snackbar_background_stream">Transmitindo em 2º plano. Toque em Parar para encerrar.</string>
+
+    <string name="help_obs">No OBS: Fonte de Mídia, desmarque Arquivo local e em Entrada use srt://0.0.0.0:9998?mode=listener&amp;latency=120 (mesma porta e latência do app). Roda em pé ou deitado; a orientação trava durante a live. Pode apertar o botão de energia: com a live no ar, ela continua com a tela apagada.</string>
+</resources>
