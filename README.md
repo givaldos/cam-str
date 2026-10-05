@@ -37,7 +37,8 @@ em Wi-Fi: sempre há codificação H.264 + rede + decodificação no caminho.
    IPv6 nas portas 9990-9999 e lista o que achar. Toque em
    **Iniciar**.
 4. O vídeo aparece no OBS em poucos segundos. **Trocar câmera** alterna entre
-   traseira e frontal sem derrubar a conexão.
+   traseira e frontal sem derrubar a conexão. O **zoom** ajusta o
+   enquadramento pelo controle deslizante ou pela pinça no preview.
 5. O app roda em pé ou deitado. O botão de tela cheia no canto do
    preview amplia a imagem para monitorar (com stats sobre ela);
    BACK ou o botão de sair volta.
@@ -96,6 +97,14 @@ Do maior para o menor corte de consumo:
   IPv6 passa por um relay UDP local automático (o status mostra
   "Transmitindo via IPv6"). No OBS, listener IPv6 usa `srt://[::]:9998?mode=listener&latency=120`
   em vez de `0.0.0.0`.
+- SRT preso em "Conectando" no IPv6: HTTP (TCP) funcionar não prova
+  que UDP passa; firewall e listener tratam cada um separado.
+  Confira no PC a Entrada `srt://[::]:9998?mode=listener...`
+  (com `0.0.0.0` o listener só atende IPv4) e a liberação de UDP
+  no firewall. No app, toque em **Procurar SRT**: se não confirmar
+  o alvo, o handshake nem chega e volta. Conectando via relay, o
+  status mostra `(↑N ↓M)`: ↑ sobe e ↓ parado = a resposta do PC
+  não volta ao celular.
 - A procura primeiro lista portas UDP candidatas por eliminação de
   ICMP, depois confirma cada uma com um handshake SRT de verdade e
   mostra só quem responde como SRT (sem duplicadas de porta
@@ -178,3 +187,16 @@ via adb, com receptor SRT de referência no PC
 - RAM estável em 84 a 104 MB durante os streams, 112 MB PSS total
   após 5 sessões. Nenhum crash após os fixes (um FATAL de Spinner e
   um BACK destruindo a Activity foram achados e corrigidos no teste).
+
+## Verificação do zoom em 03/10/2026
+
+Emulador Pixel (Android 17) com câmeras virtualscene e emulada,
+dirigindo a UI de verdade via adb:
+
+- Slider percorre a faixa real da câmera (1.0x a 12.9x na traseira
+  emulada, rótulo acompanha) e o preview reflete cada mudança.
+- Câmera sem zoom (faixa 1.0-1.0) deixa o controle desligado em 1.0x.
+- Troca de câmera atualiza a faixa sem crash, nos dois sentidos.
+- Valor salvo (3.4x) é restaurado após matar e reabrir o app.
+- Nenhum crash após os fixes (dois FATAL do Slider com faixa
+  degenerada e passo incompatível, achados e corrigidos no teste).

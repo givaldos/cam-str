@@ -2,6 +2,7 @@ package com.camsrt.obs
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -56,6 +57,49 @@ class SrtRelayTest {
                 assertTrue(relay.forwardedToClient >= 1)
             } finally {
                 client.close()
+            }
+        } finally {
+            relay.stop()
+            target.close()
+        }
+    }
+
+    @Test
+    fun forwardsBothWaysToIpv6() {
+        // Perna IPv6 do relay (a usada com alvo só IPv6): sem ::1, pula.
+        try {
+            DatagramSocket(InetSocketAddress(InetAddress.getByName("::1"), 0)).close()
+        } catch (_: Throwable) {
+            assumeTrue(false)
+        }
+        val loop4 = InetAddress.getByName("127.0.0.1")
+        val loop6 = InetAddress.getByName("::1")
+        val target = DatagramSocket(InetSocketAddress(loop6, 0))
+        target.soTimeout = 5000
+        val relay = SrtRelay(target.localSocketAddress as InetSocketAddress)
+        val localPort = relay.start()
+        try {
+            DatagramSocket().use { client ->
+                client.soTimeout = 5000
+                client.send(
+                    DatagramPacket(
+                        "ping6".toByteArray(), 5, InetSocketAddress(loop4, localPort)
+                    )
+                )
+                val buf = ByteArray(2048)
+                val atTarget = DatagramPacket(buf, buf.size)
+                target.receive(atTarget)
+                assertEquals("ping6", String(atTarget.data, 0, atTarget.length))
+                target.send(
+                    DatagramPacket(
+                        "pong6".toByteArray(), 5, atTarget.socketAddress
+                    )
+                )
+                val back = DatagramPacket(buf, buf.size)
+                client.receive(back)
+                assertEquals("pong6", String(back.data, 0, back.length))
+                assertTrue(relay.forwardedToTarget >= 1)
+                assertTrue(relay.forwardedToClient >= 1)
             }
         } finally {
             relay.stop()

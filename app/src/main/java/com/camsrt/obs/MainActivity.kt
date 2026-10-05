@@ -37,11 +37,13 @@ import com.google.android.material.color.DynamicColors
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import com.google.android.material.slider.Slider
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputLayout
 import com.google.android.material.R as MaterialR
 import io.github.thibaultbee.streampack.core.elements.sources.audio.audiorecord.MicrophoneSourceFactory
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSourceFactory
+import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ICameraSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.cameraManager
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.defaultCameraId
 import io.github.thibaultbee.streampack.core.configuration.BitrateRegulatorConfig
@@ -147,6 +149,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var bitrateInput: EditText
     private lateinit var audioCheck: SwitchMaterial
     private lateinit var qualityInput: AutoCompleteTextView
+    private lateinit var zoomSlider: Slider
+    private lateinit var zoomLabel: TextView
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
     private lateinit var switchButton: Button
@@ -171,6 +175,7 @@ class MainActivity : ComponentActivity() {
     private var reconnectAttempt = 0
     private var scanJob: Job? = null
     private var connecting = false
+    private var zoomJob: Job? = null
 
     private var videoSize = Size(1920, 1080)
     private var videoFps = 30
@@ -235,6 +240,8 @@ class MainActivity : ComponentActivity() {
         bitrateInput = findViewById(R.id.bitrateInput)
         audioCheck = findViewById(R.id.audioCheck)
         qualityInput = findViewById(R.id.qualityInput)
+        zoomSlider = findViewById(R.id.zoomSlider)
+        zoomLabel = findViewById(R.id.zoomLabel)
         startButton = findViewById(R.id.startButton)
         stopButton = findViewById(R.id.stopButton)
         switchButton = findViewById(R.id.switchButton)
@@ -245,6 +252,7 @@ class MainActivity : ComponentActivity() {
 
         restoreFields()
         setupQualityDropdown()
+        setupZoom()
 
         localIpText.text =
             "IP deste celular: ${deviceIp()} (IP do PC vazio varre a rede)"
@@ -487,7 +495,9 @@ class MainActivity : ComponentActivity() {
                     async {
                         sem.withPermit {
                             port.takeIf { p ->
-                                addrs.any { udpProbeAddress(it, p, HOST_PROBE_TIMEOUT_MS) }
+                                addrs.any {
+                                    udpProbeAddress(withScope(it), p, HOST_PROBE_TIMEOUT_MS)
+                                }
                             }
                         }
                     }
@@ -507,7 +517,9 @@ class MainActivity : ComponentActivity() {
                 val confirmed = candidates.map { port ->
                     async {
                         sem.withPermit {
-                            port.takeIf { p -> addrs.any { confirmSrt(it, p) } }
+                            port.takeIf { p ->
+                                addrs.any { confirmSrt(withScope(it), p) }
+                            }
                         }
                     }
                 }.awaitAll().filterNotNull().sorted()
@@ -1066,6 +1078,7 @@ class MainActivity : ComponentActivity() {
                     videoSize = s
                     videoFps = f
                     observeStreamer(streamer)
+                    refreshZoomRange()
                     val mode = "${s.width}x${s.height}@$f"
                     setStatus("Pronto ($mode). Preencha o IP do PC e toque em Iniciar.")
                     return@launch
@@ -1123,7 +1136,7 @@ class MainActivity : ComponentActivity() {
             launch {
                 s.throwableFlow.collect { t ->
                     runOnUiThread {
-                        if (isStreaming) setStatus("Erro: ${t?.message ?: t}")
+                        if (isStreaming) setStatus("Erro: ${SrtErrors.describe(t?.message)}")
                     }
                 }
             }
@@ -1253,7 +1266,25 @@ class MainActivity : ComponentActivity() {
                 setStatusIfLatest(
                     seq, if (relayed) "Conectando via IPv6…" else "Conectando…"
                 )
-                s.startStream(descriptor)
+                // Via relay, mostra pacotes enviados/recebidos enquanto
+                // conecta: ↑ sobe e ↓ parado = a resposta não volta
+                // (listener, firewall ou endereço errado).
+                val monitor = if (relayed) launch {
+                    while (isActive) {
+                        delay(2000)
+                        val counters = relayCounters()
+                        if (counters.isNotEmpty()) {
+                            runOnUiThread {
+                                setStatusIfLatest(seq, "Conectando via IPv6… $counters")
+                            }
+                        }
+                    }
+                } else null
+                try {
+                    s.startStream(descriptor)
+                } finally {
+                    monitor?.cancel()
+                }
                 if (userStopped) {
                     // Cancelado no meio do handshake: garante parado.
                     try {
@@ -1282,7 +1313,7 @@ class MainActivity : ComponentActivity() {
                 stopRelay()
                 runOnUiThread {
                     if (!userStopped) {
-                        scheduleReconnect("Falha ao iniciar: ${t.message}")
+                        scheduleReconnect("Falha ao iniciar: ${SrtErrors.describe(t.message)}")
                     } else {
                         setStatusIfLatest(seq, "Conexão cancelada")
                         updateStreamButtons()
@@ -1333,6 +1364,12 @@ class MainActivity : ComponentActivity() {
 
     private fun streamingStatus(): String =
         if (relayedNow) "Transmitindo via IPv6…" else "Transmitindo…"
+
+    /** Contadores do relay para diagnóstico: "(↑12 ↓0)". Vazio sem relay. */
+    private fun relayCounters(): String {
+        val r = activeRelay ?: return ""
+        return "(↑${r.forwardedToTarget} ↓${r.forwardedToClient})"
+    }
 
     private fun applyRegulator(s: SingleStreamer, maxBitrate: Int) {
         try {
@@ -1417,7 +1454,9 @@ class MainActivity : ComponentActivity() {
             reconnectAttempt <= 40 -> 15L
             else -> 30L
         }
-        setStatus("$reason. Reconectando em ${delayS}s (tentativa $reconnectAttempt)…")
+        val counters = relayCounters()
+        val suffix = if (counters.isEmpty()) "" else " $counters"
+        setStatus("$reason. Reconectando em ${delayS}s (tentativa $reconnectAttempt)…$suffix")
         reconnectJob = lifecycleScope.launch {
             delay(delayS * 1000)
             if (!isActive || userStopped || isStreaming) return@launch
@@ -1658,10 +1697,12 @@ class MainActivity : ComponentActivity() {
                 // Memória só a cada 5 ticks (getProcessMemoryInfo tem custo).
                 if (ticks % 5 == 0) memMb = appMemoryMb()
                 val mem = if (memMb >= 0) " • RAM $memMb MB" else ""
+                val relay = relayCounters()
+                    .takeIf { relayedNow && it.isNotEmpty() }?.let { " • relay $it" } ?: ""
                 val line = String.format(
-                    "%02d:%02d:%02d • %dx%d@%d • teto %d Mbps • %s%s",
+                    "%02d:%02d:%02d • %dx%d@%d • teto %d Mbps • %s%s%s",
                     h, m, sec, videoSize.width, videoSize.height, videoFps,
-                    effectiveCeiling() / 1_000_000, thermalLabel(), mem
+                    effectiveCeiling() / 1_000_000, thermalLabel(), mem, relay
                 )
                 statsText.text = line
                 if (fullscreen) fullscreenStats.text = line
@@ -1689,6 +1730,99 @@ class MainActivity : ComponentActivity() {
 
     // ---------- Câmera extra ----------
 
+    /**
+     * Zoom para ajuste do enquadramento: o slider aplica o zoom da
+     * câmera (vale ao vivo, com ou sem stream) e a pinça no preview
+     * continua funcionando, com o slider acompanhando. O último valor
+     * é salvo e reaplicado ao abrir ou trocar de câmera.
+     */
+    private fun setupZoom() {
+        // Contínuo de propósito: o máximo varia por câmera (ex. 12.93) e
+        // o Slider derruba o app se o passo não dividir a faixa exata.
+        zoomSlider.stepSize = 0f
+        zoomSlider.isEnabled = false
+        zoomSlider.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) applyZoom(value)
+        }
+        preview.listener = object : PreviewView.Listener {
+            override fun onZoomRationOnPinchChanged(zoomRatio: Float) {
+                syncZoomUi(zoomRatio)
+                prefs.edit().putFloat("zoom", zoomRatio).apply()
+            }
+        }
+    }
+
+    private fun formatZoom(ratio: Float): String =
+        String.format("%.1fx", ratio)
+
+    /** Reflete o zoom atual no slider e no rótulo, sem reaplicar. */
+    private fun syncZoomUi(ratio: Float) {
+        try {
+            zoomSlider.value =
+                ratio.coerceIn(zoomSlider.valueFrom, zoomSlider.valueTo)
+        } catch (_: Throwable) {
+        }
+        zoomLabel.text = formatZoom(ratio)
+    }
+
+    /** Aplica o zoom pedido no slider (cancela o anterior). */
+    private fun applyZoom(ratio: Float) {
+        zoomLabel.text = formatZoom(ratio)
+        zoomJob?.cancel()
+        zoomJob = lifecycleScope.launch {
+            try {
+                val source = streamer?.videoInput?.sourceFlow?.value
+                    as? ICameraSource ?: return@launch
+                source.settings.zoom.setZoomRatio(ratio)
+                prefs.edit().putFloat("zoom", ratio).apply()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /**
+     * Lê a faixa de zoom da câmera atual, ajusta o slider e reaplica
+     * o último zoom salvo. Chamar ao abrir e ao trocar de câmera.
+     */
+    private fun refreshZoomRange() {
+        lifecycleScope.launch {
+            val source = streamer?.videoInput?.sourceFlow?.value
+                as? ICameraSource ?: return@launch
+            val range = try {
+                source.settings.zoom.availableRatioRange
+            } catch (_: Throwable) {
+                return@launch
+            }
+            val saved = try {
+                prefs.getFloat("zoom", 1f).coerceIn(range.lower, range.upper)
+            } catch (_: Throwable) {
+                1f
+            }
+            try {
+                source.settings.zoom.setZoomRatio(saved)
+            } catch (_: Throwable) {
+            }
+            // O Slider exige mínimo < máximo: sem zoom na câmera, usa
+            // faixa fictícia com o controle desligado.
+            val hasZoom = range.upper > range.lower
+            val from = if (hasZoom) range.lower else 1f
+            val to = if (hasZoom) range.upper else 1.1f
+            try {
+                // Alarga antes de mexer, para nenhum passo intermediário
+                // sair da faixa e lançar IllegalArgumentException.
+                zoomSlider.valueFrom = minOf(zoomSlider.valueFrom, from)
+                zoomSlider.valueTo = maxOf(zoomSlider.valueTo, to)
+                zoomSlider.value = if (hasZoom) saved else from
+                zoomSlider.valueFrom = from
+                zoomSlider.valueTo = to
+                zoomSlider.isEnabled = hasZoom
+            } catch (_: Throwable) {
+                zoomSlider.isEnabled = false
+            }
+            zoomLabel.text = formatZoom(saved)
+        }
+    }
+
     private fun switchCamera() {
         val s = streamer ?: return
         if (cameraIds.isEmpty()) return
@@ -1697,6 +1831,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 s.setVideoSource(CameraSourceFactory(cameraIds[cameraIndex]))
+                refreshZoomRange()
                 setStatusIfLatest(seq, if (isStreaming) streamingStatus() else "Câmera alternada")
             } catch (t: Throwable) {
                 runOnUiThread { setStatusIfLatest(seq, "Falha ao trocar câmera: ${t.message}") }

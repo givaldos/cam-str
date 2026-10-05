@@ -20,6 +20,8 @@
     <string name="label_latency">Latência SRT (ms)</string>
     <string name="label_bitrate">Bitrate (Mbps)</string>
     <string name="label_quality">Qualidade</string>
+    <string name="label_zoom">Zoom</string>
+    <string name="desc_zoom">Ajustar zoom da câmera</string>
     <string name="error_host_required">Informe o IP do PC com OBS</string>
 
     <string name="action_start">Iniciar</string>
