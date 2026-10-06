@@ -206,6 +206,74 @@ class SrtPortsTest {
     }
 
     @Test
+    fun lastOctetExpandsWithLocalSlash24() {
+        assertEquals("192.168.0.10", SrtPorts.expandLastOctet("10", "192.168.0.20"))
+        assertEquals("192.168.0.10", SrtPorts.expandLastOctet(".10", "192.168.0.20"))
+        assertEquals("192.168.0.10", SrtPorts.expandLastOctet("  10  ", "192.168.0.20"))
+        assertEquals("10.5.9.1", SrtPorts.expandLastOctet("1", "10.5.9.200"))
+    }
+
+    @Test
+    fun fullHostsAreNotExpanded() {
+        assertEquals("192.168.0.10", SrtPorts.expandLastOctet("192.168.0.10", "192.168.0.20"))
+        assertEquals("meumac.local", SrtPorts.expandLastOctet("meumac.local", "192.168.0.20"))
+        assertEquals("fe80::1", SrtPorts.expandLastOctet("fe80::1", "192.168.0.20"))
+        assertEquals("1.2.3", SrtPorts.expandLastOctet("1.2.3", "192.168.0.20"))
+        assertEquals("", SrtPorts.expandLastOctet("", "192.168.0.20"))
+    }
+
+    @Test
+    fun shortAndExpandedFormResolveToSameTarget() {
+        // O campo guarda o digitado ("10") e expande só ao usar: as
+        // duas formas precisam levar ao mesmo alvo.
+        val local = "192.168.0.20"
+        val expanded = SrtPorts.expandLastOctet("10", local)
+        assertEquals("192.168.0.10", expanded)
+        assertEquals(expanded, SrtPorts.expandLastOctet(expanded, local))
+    }
+
+    @Test
+    fun badOctetOrMissingLocalStaysAsIs() {
+        assertEquals("256", SrtPorts.expandLastOctet("256", "192.168.0.20"))
+        assertEquals("1234", SrtPorts.expandLastOctet("1234", "192.168.0.20"))
+        assertEquals("10", SrtPorts.expandLastOctet("10", null))
+        assertEquals("10", SrtPorts.expandLastOctet("10", "abc"))
+        assertEquals("10", SrtPorts.expandLastOctet("10", ""))
+    }
+
+    @Test
+    fun callerUrlUsesLatencyInMilliseconds() {
+        assertEquals(
+            "srt://192.168.0.10:9998?latency=120&connect_timeout=15000",
+            SrtPorts.callerSrtUrl("192.168.0.10", 9998, 120)
+        )
+        assertEquals(
+            "srt://127.0.0.1:45678?latency=200&connect_timeout=15000",
+            SrtPorts.callerSrtUrl("127.0.0.1", 45678, 200)
+        )
+    }
+
+    @Test
+    fun callerUrlClampsLatencyToSaneRange() {
+        assertEquals(
+            "srt://192.168.0.10:9998?latency=5000&connect_timeout=15000",
+            SrtPorts.callerSrtUrl("192.168.0.10", 9998, 120000)
+        )
+        assertEquals(
+            "srt://192.168.0.10:9998?latency=20&connect_timeout=15000",
+            SrtPorts.callerSrtUrl("192.168.0.10", 9998, 0)
+        )
+    }
+
+    @Test
+    fun callerUrlFormatsIpv6Host() {
+        assertEquals(
+            "srt://[fe80::1]:9998?latency=120&connect_timeout=15000",
+            SrtPorts.callerSrtUrl("fe80::1", 9998, 120)
+        )
+    }
+
+    @Test
     fun onlyPrivateIpv4IsSweepable() {
         assertTrue(SrtPorts.isSweepableIpv4("192.168.0.10"))
         assertTrue(SrtPorts.isSweepableIpv4("10.0.0.5"))

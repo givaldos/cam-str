@@ -25,12 +25,16 @@ em Wi-Fi: sempre há codificação H.264 + rede + decodificação no caminho.
 2. No OBS: **Fontes > + > Fonte de Mídia**. Desmarque **Arquivo local** e em
    **Entrada** coloque (ajuste porta e latência iguais às do app):
 
-   `srt://0.0.0.0:9998?mode=listener&latency=120`
+   `srt://0.0.0.0:9998?mode=listener&latency=120000`
+
+   A latência no OBS é em microssegundos: 120 ms = 120000.
 
    Confirme. A fonte fica preta até o celular conectar.
 3. No app, escolha a qualidade (padrão **1080p30 Estável**), digite o
-   **IP do PC**, confira porta (9998), latência (120) e bitrate
-   (8 Mbps). Sem saber a porta? Digite o IP e toque em **Procurar
+   **IP do PC** (vale só o último octeto, ex. `10`, que o app
+   completa com a rede do celular), confira porta (9998), latência
+   (120) e bitrate (8 Mbps). Sem saber a porta? Digite o IP e toque
+   em **Procurar
    SRT** (o campo porta aceita faixa, ex. `9900-9910`). Sem saber o
    IP (ex. Mac com compartilhamento de rede)? Deixe o IP vazio e
    toque em **Procurar SRT**: o app varre a rede local em IPv4 e
@@ -67,7 +71,7 @@ O que o app faz sozinho durante a live:
 - **Guarda térmica**: se esquentar, reduz o bitrate sem cortar o
   stream; se esquentar muito, sai do full, desliga o preview e
   escurece a tela.
-- Linha de stats com tempo, resolução, teto de bitrate, temperatura e RAM.
+- Bloco de stats em 3 linhas: tempo/resolução/teto, temperatura/RAM e rede SRT (taxa, RTT, perda, fila).
 - Último estado salvo e restaurado: IP, porta, latência, bitrate,
   áudio, qualidade, preview, brilho e modo economia.
 - Inputs travados com live no ar (nada ali vale durante o stream) e
@@ -90,16 +94,23 @@ Do maior para o menor corte de consumo:
 
 - Fique perto do roteador, prefira 5 GHz e evite micro-ondas e redes lotadas.
 - Travou ou atrasou: baixe o bitrate para 6 ou 4 Mbps, ou suba a latência SRT
-  para 200 ms no app e no OBS (os dois lados precisam do mesmo valor).
+  para 200 ms no app e 200000 no OBS (os dois lados precisam do
+  mesmo valor; no app é ms, no OBS é µs). O bloco de stats mostra,
+  em 3 linhas, tempo/resolução/teto, temperatura/RAM e
+  `SRT xM • RTT yms • perda z • buf wms`: perda subindo ou taxa bem
+  abaixo do teto indica Wi-Fi saturada, e aí o remédio é bitrate
+  menor ou PC no cabo (tira metade do tráfego do ar).
 - Libere a porta no firewall do PC se o OBS não receber nada.
 - IPv6: a procura acha o listener em IPv4 e IPv6, e a transmissão
   funciona nos dois. Como a biblioteca SRT só disca IPv4, alvo só
   IPv6 passa por um relay UDP local automático (o status mostra
-  "Transmitindo via IPv6"). No OBS, listener IPv6 usa `srt://[::]:9998?mode=listener&latency=120`
-  em vez de `0.0.0.0`.
+  "Transmitindo via IPv6"). No OBS, listener IPv6 usa o endereço
+  específico do PC, ex.
+  `srt://[fe80::xxx]:9998?mode=listener&latency=120000`
+  (o curinga `srt://[::]:...` falha no FFmpeg atual, ticket 10539).
 - SRT preso em "Conectando" no IPv6: HTTP (TCP) funcionar não prova
   que UDP passa; firewall e listener tratam cada um separado.
-  Confira no PC a Entrada `srt://[::]:9998?mode=listener...`
+  Confira no PC a Entrada com o IPv6 específico do PC
   (com `0.0.0.0` o listener só atende IPv4) e a liberação de UDP
   no firewall. No app, toque em **Procurar SRT**: se não confirmar
   o alvo, o handshake nem chega e volta. Conectando via relay, o

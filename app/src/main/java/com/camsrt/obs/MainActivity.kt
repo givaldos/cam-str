@@ -54,6 +54,7 @@ import io.github.thibaultbee.streampack.core.streamers.single.AudioConfig
 import io.github.thibaultbee.streampack.core.streamers.single.SingleStreamer
 import io.github.thibaultbee.streampack.core.streamers.single.VideoConfig
 import io.github.thibaultbee.streampack.ext.srt.configuration.mediadescriptor.SrtMediaDescriptor
+import io.github.thibaultbee.srtdroid.core.models.Stats as SrtStats
 import io.github.thibaultbee.streampack.ui.views.PreviewView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -188,7 +189,6 @@ class MainActivity : ComponentActivity() {
     private var dimmed = false
     private var fullscreen = false
     private var savedCardHeight = 0
-    private var savedContainerHeight = 0
     private var qualityPosition = 0
     private var economyMode = false
     private data class StreamTarget(val host: String, val port: Int, val latency: Int)
@@ -253,9 +253,12 @@ class MainActivity : ComponentActivity() {
         restoreFields()
         setupQualityDropdown()
         setupZoom()
+        // Altura do preview na orientação atual (cobre abrir deitado).
+        previewContainer.layoutParams = previewContainer.layoutParams.apply {
+            height = defaultPreviewHeightPx()
+        }
 
-        localIpText.text =
-            "IP deste celular: ${deviceIp()} (IP do PC vazio varre a rede)"
+        localIpText.text = "IP deste celular: ${deviceIp()}"
         startButton.setOnClickListener { startStream() }
         stopButton.setOnClickListener { stopStream() }
         switchButton.setOnClickListener { switchCamera() }
@@ -279,7 +282,15 @@ class MainActivity : ComponentActivity() {
             economySwitch.performClick()
         }
         audioCheck.setOnClickListener { saveFields() }
-        hostInput.doOnTextChanged { _, _, _, _ -> hostLayout.error = null }
+        // Salva a cada tecla: a abertura seguinte já mostra tudo
+        // preenchido, e nada se perde nem se o app morrer.
+        hostInput.doOnTextChanged { _, _, _, _ ->
+            hostLayout.error = null
+            saveFields()
+        }
+        portInput.doOnTextChanged { _, _, _, _ -> saveFields() }
+        latencyInput.doOnTextChanged { _, _, _, _ -> saveFields() }
+        bitrateInput.doOnTextChanged { _, _, _, _ -> saveFields() }
         updateBatteryButton()
         updateStatusChip()
         registerThermalListener()
@@ -295,23 +306,14 @@ class MainActivity : ComponentActivity() {
     private fun setupQualityDropdown() {
         // Menu suspenso M3 (sem filtro: inputType=none, posição = índice).
         // Linha do menu em 2 linhas (título + detalhe pequeno); o campo
-        // mostra só o título curto para não quebrar o layout.
+        // mostra só o título (o AutoCompleteTextView desenha o próprio
+        // texto, o adapter só alimenta o popup). O popup usa getView
+        // (getDropDownView é só de Spinner), então as 2 linhas vivem
+        // aqui; sem isso a descrição nunca aparece.
         val adapter = object : ArrayAdapter<Quality>(
-            this, R.layout.list_item_dropdown_selected, qualities
+            this, R.layout.list_item_dropdown, qualities
         ) {
             override fun getView(
-                position: Int,
-                convertView: android.view.View?,
-                parent: android.view.ViewGroup
-            ): android.view.View {
-                val v = convertView ?: layoutInflater.inflate(
-                    R.layout.list_item_dropdown_selected, parent, false
-                )
-                (v as TextView).text = getItem(position)?.label
-                return v
-            }
-
-            override fun getDropDownView(
                 position: Int,
                 convertView: android.view.View?,
                 parent: android.view.ViewGroup
@@ -456,9 +458,53 @@ class MainActivity : ComponentActivity() {
      * as demais são candidatas e passam por confirmação de handshake
      * SRT, que lista só quem responde como SRT de verdade.
      */
+    /**
+     * IP efetivo do campo: só o último octeto ("10") completa com o
+     * /24 do Wi-Fi do celular na hora de usar, mas o campo mantém o
+     * que foi digitado, e é isso que fica salvo. Assim o atalho "10"
+     * continua valendo se o celular trocar de rede, sem reeditar. O
+     * IP cheio aparece no status ao conectar.
+     */
+    private fun effectiveHost(): String {
+        val raw = hostInput.text.toString().trim()
+        return SrtPorts.expandLastOctet(raw, deviceIpv4())
+    }
+
+    /** IPv4 do celular na rede boa (Wi-Fi e cabo antes de resto e móveis). */
+    private fun deviceIpv4(): String? {
+        return try {
+            val found = mutableListOf<Pair<Int, String>>()
+            val ifs = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            for (nif in ifs) {
+                try {
+                    if (!nif.isUp || nif.isLoopback) continue
+                } catch (_: Throwable) {
+                    continue
+                }
+                val name = try {
+                    nif.name
+                } catch (_: Throwable) {
+                    ""
+                }
+                for (addr in nif.inetAddresses.toList()) {
+                    if (addr !is Inet4Address || addr.isLoopbackAddress) continue
+                    val ip = try {
+                        addr.hostAddress
+                    } catch (_: Throwable) {
+                        null
+                    } ?: continue
+                    found += SrtPorts.interfaceNameScore(name) to ip
+                }
+            }
+            found.minByOrNull { it.first }?.second
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private fun scanSrtPorts() {
         if (scanJob?.isActive == true) return
-        val host = hostInput.text.toString().trim()
+        val host = effectiveHost()
         if (host.isEmpty()) {
             scanNetwork()
         } else {
@@ -1180,16 +1226,29 @@ class MainActivity : ComponentActivity() {
         updateStatusChip()
     }
 
-    /** Chip de estado: vermelho AO VIVO transmitindo, neutro parado. */
+    /**
+     * Chip de estado: vermelho AO VIVO transmitindo, âmbar
+     * Conectando (handshake ou espera de retry) e neutro parado.
+     */
     private fun updateStatusChip() {
-        val live = isStreaming
+        val busy = connecting || reconnectJob?.isActive == true
         statusChip.text = getString(
-            if (live) R.string.chip_live else R.string.chip_idle
+            when {
+                isStreaming -> R.string.chip_live
+                busy -> R.string.chip_connecting
+                else -> R.string.chip_idle
+            }
         )
-        val bgAttr = if (live) MaterialR.attr.colorErrorContainer
-        else MaterialR.attr.colorSecondaryContainer
-        val fgAttr = if (live) MaterialR.attr.colorOnErrorContainer
-        else MaterialR.attr.colorOnSecondaryContainer
+        val bgAttr = when {
+            isStreaming -> MaterialR.attr.colorErrorContainer
+            busy -> MaterialR.attr.colorTertiaryContainer
+            else -> MaterialR.attr.colorSecondaryContainer
+        }
+        val fgAttr = when {
+            isStreaming -> MaterialR.attr.colorOnErrorContainer
+            busy -> MaterialR.attr.colorOnTertiaryContainer
+            else -> MaterialR.attr.colorOnSecondaryContainer
+        }
         statusChip.chipBackgroundColor = ColorStateList.valueOf(
             MaterialColors.getColor(this, bgAttr, 0)
         )
@@ -1202,7 +1261,7 @@ class MainActivity : ComponentActivity() {
             setStatus("Câmera ainda iniciando, aguarde")
             return
         }
-        val host = hostInput.text.toString().trim()
+        val host = effectiveHost()
         if (host.isEmpty()) {
             hostLayout.error = getString(R.string.error_host_required)
             setStatus(getString(R.string.error_host_required))
@@ -1233,7 +1292,8 @@ class MainActivity : ComponentActivity() {
         connectJob?.cancel()
         connectJob = lifecycleScope.launch {
             try {
-                setStatus("Conectando…")
+                // Mostra o alvo cheio: o campo pode ter só o atalho ("10").
+                setStatus("Conectando em ${target.host}:${target.port}…")
                 // Aplica bitrate antes de conectar (encoder parado aceita).
                 if (!isStreaming) {
                     try {
@@ -1264,7 +1324,8 @@ class MainActivity : ComponentActivity() {
                 }
                 relayedNow = relayed
                 setStatusIfLatest(
-                    seq, if (relayed) "Conectando via IPv6…" else "Conectando…"
+                    seq, if (relayed) "Conectando via IPv6 em ${target.host}:${target.port}…"
+                    else "Conectando em ${target.host}:${target.port}…"
                 )
                 // Via relay, mostra pacotes enviados/recebidos enquanto
                 // conecta: ↑ sobe e ↓ parado = a resposta não volta
@@ -1333,8 +1394,7 @@ class MainActivity : ComponentActivity() {
         return when (val route = SrtPorts.routeFor(t.host)) {
             is SrtPorts.StreamRoute.Direct -> Pair(
                 SrtMediaDescriptor(
-                    "srt://${SrtPorts.formatSrtHost(route.hostForUrl)}:${t.port}" +
-                        "?latency=${t.latency}&connect_timeout=15000"
+                    SrtPorts.callerSrtUrl(route.hostForUrl, t.port, t.latency)
                 ),
                 false
             )
@@ -1345,7 +1405,7 @@ class MainActivity : ComponentActivity() {
                 activeRelay = relay
                 Pair(
                     SrtMediaDescriptor(
-                        "srt://127.0.0.1:$localPort?latency=${t.latency}&connect_timeout=15000"
+                        SrtPorts.callerSrtUrl("127.0.0.1", localPort, t.latency)
                     ),
                     true
                 )
@@ -1364,6 +1424,24 @@ class MainActivity : ComponentActivity() {
 
     private fun streamingStatus(): String =
         if (relayedNow) "Transmitindo via IPv6…" else "Transmitindo…"
+
+    /**
+     * Linha de rede do bloco de stats: taxa real de envio, RTT,
+     * perda recente e fila de envio (buf). Vazia com socket fechado.
+     * Perda alta ou taxa bem abaixo do teto apontam rede saturada;
+     * buf na casa de segundos aponta fila dentro do app.
+     */
+    private fun srtStatsSegment(): String {
+        return try {
+            val s = streamer?.endpoint?.metrics as? SrtStats ?: return ""
+            "SRT %.1fM • RTT %dms • perda %d • buf %dms".format(
+                s.mbpsSendRate, s.msRTT.toInt(), s.pktSndLoss + s.pktRcvLoss,
+                s.msSndBuf
+            )
+        } catch (_: Throwable) {
+            ""
+        }
+    }
 
     /** Contadores do relay para diagnóstico: "(↑12 ↓0)". Vazio sem relay. */
     private fun relayCounters(): String {
@@ -1416,12 +1494,14 @@ class MainActivity : ComponentActivity() {
                     )
                     statsText.text = ""
                     fullscreenStats.text = ""
+                    fullscreenStats.visibility = android.view.View.GONE
                     applyButtonState(
                         StreamButtons.resolve(
                             isStreaming = false, connecting = false,
                             retryPending = false
                         )
                     )
+                    updateStatusChip()
                     setInputsEnabled(true)
                 }
             }
@@ -1571,14 +1651,41 @@ class MainActivity : ComponentActivity() {
         saveFields()
     }
 
+    /** Altura normal do preview na orientação atual (em pé/deitado). */
+    private fun defaultPreviewHeightPx(): Int = resources.getDimensionPixelSize(
+        if (resources.configuration.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        ) R.dimen.preview_height_land else R.dimen.preview_height
+    )
+
+    /**
+     * A atividade não recria no giro (configChanges, para não
+     * derrubar a câmera): ajusta a altura do preview aqui. No
+     * fullscreen não mexe (é MATCH_PARENT; a saída restaura pela
+     * orientação atual, não pelo valor salvo antes do giro).
+     */
+    override fun onConfigurationChanged(
+        newConfig: android.content.res.Configuration
+    ) {
+        super.onConfigurationChanged(newConfig)
+        if (!fullscreen) {
+            val lp = previewContainer.layoutParams
+            lp.height = defaultPreviewHeightPx()
+            previewContainer.layoutParams = lp
+        }
+    }
+
     private fun toggleFullscreen() {
         fullscreen = !fullscreen
         val cardLp = previewCard.layoutParams as android.view.ViewGroup.MarginLayoutParams
         val containerLp = previewContainer.layoutParams
         if (fullscreen) {
             if (!previewOn) togglePreview() // full é para monitorar: garante imagem
+            // Ocupa a tela toda de verdade: sem isso o card respeita os
+            // insets e sobra uma faixa branca nas barras do sistema.
+            rootView.fitsSystemWindows = false
+            rootView.requestApplyInsets()
             savedCardHeight = cardLp.height
-            savedContainerHeight = containerLp.height
             cardLp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
             cardLp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
             cardLp.setMargins(0, 0, 0, 0)
@@ -1588,12 +1695,18 @@ class MainActivity : ComponentActivity() {
             previewContainer.layoutParams = containerLp
             topAppBar.visibility = android.view.View.GONE
             controlsScroll.visibility = android.view.View.GONE
-            fullscreenStats.visibility = android.view.View.VISIBLE
+            // Só mostra a tarja se já tem texto (ao vivo): vazia ela
+            // viraria uma barra preta no topo.
+            fullscreenStats.visibility =
+                if (fullscreenStats.text.isNullOrEmpty()) android.view.View.GONE
+                else android.view.View.VISIBLE
             fullscreenButton.setIconResource(R.drawable.ic_fullscreen_exit_24)
             fullscreenButton.contentDescription =
                 getString(R.string.desc_fullscreen_exit)
             hideSystemBars()
         } else {
+            rootView.fitsSystemWindows = true
+            rootView.requestApplyInsets()
             val marginH = resources.getDimensionPixelSize(R.dimen.spacing_medium)
             val marginTop = resources.getDimensionPixelSize(R.dimen.spacing_small)
             cardLp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -1601,7 +1714,7 @@ class MainActivity : ComponentActivity() {
             cardLp.setMargins(marginH, marginTop, marginH, 0)
             previewCard.layoutParams = cardLp
             previewCard.radius = resources.getDimension(R.dimen.card_corner)
-            containerLp.height = savedContainerHeight
+            containerLp.height = defaultPreviewHeightPx()
             previewContainer.layoutParams = containerLp
             topAppBar.visibility = android.view.View.VISIBLE
             controlsScroll.visibility = android.view.View.VISIBLE
@@ -1696,16 +1809,26 @@ class MainActivity : ComponentActivity() {
                 val sec = (elapsed % 60_000) / 1000
                 // Memória só a cada 5 ticks (getProcessMemoryInfo tem custo).
                 if (ticks % 5 == 0) memMb = appMemoryMb()
-                val mem = if (memMb >= 0) " • RAM $memMb MB" else ""
-                val relay = relayCounters()
-                    .takeIf { relayedNow && it.isNotEmpty() }?.let { " • relay $it" } ?: ""
-                val line = String.format(
-                    "%02d:%02d:%02d • %dx%d@%d • teto %d Mbps • %s%s%s",
+                // Bloco de 3 linhas curtas: cada uma cabe numa linha de
+                // celular estreito sem quebrar no meio das unidades (a
+                // linha única antiga quebrava em pontos aleatórios e
+                // estourava para fora da tela no fullscreen).
+                val video = "%02d:%02d:%02d • %dx%d@%d • teto %d Mbps".format(
                     h, m, sec, videoSize.width, videoSize.height, videoFps,
-                    effectiveCeiling() / 1_000_000, thermalLabel(), mem, relay
+                    effectiveCeiling() / 1_000_000
                 )
+                val health = if (memMb >= 0) "${thermalLabel()} • RAM $memMb MB"
+                else thermalLabel()
+                val relay = relayCounters()
+                    .takeIf { relayedNow && it.isNotEmpty() }?.let { " • $it" } ?: ""
+                val net = srtStatsSegment() + relay
+                val line = listOf(video, health, net)
+                    .filter { it.isNotEmpty() }.joinToString("\n")
                 statsText.text = line
-                if (fullscreen) fullscreenStats.text = line
+                if (fullscreen) {
+                    fullscreenStats.text = line
+                    fullscreenStats.visibility = android.view.View.VISIBLE
+                }
                 ticks++
                 // Economia atualiza de 5 em 5s: menos wake da CPU.
                 delay(if (economyMode) 5000 else 1000)

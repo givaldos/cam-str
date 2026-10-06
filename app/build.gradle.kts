@@ -34,6 +34,7 @@ dependencies {
     implementation("io.github.thibaultbee.streampack:streampack-core:$streampack")
     implementation("io.github.thibaultbee.streampack:streampack-ui:$streampack")
     implementation("io.github.thibaultbee.streampack:streampack-srt:$streampack")
+    implementation("io.github.thibaultbee.srtdroid:srtdroid-core:1.9.5")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-ktx:1.9.2")

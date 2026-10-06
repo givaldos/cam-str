@@ -42,11 +42,13 @@
 
                 <TextView
                     android:id="@+id/fullscreenStats"
-                    android:layout_width="wrap_content"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_gravity="top|start"
                     android:layout_margin="@dimen/spacing_small"
                     android:background="#CC000000"
+                    android:ellipsize="end"
+                    android:maxLines="4"
                     android:paddingHorizontal="10dp"
                     android:paddingVertical="6dp"
                     android:textAppearance="?attr/textAppearanceBodySmall"
@@ -170,7 +172,7 @@
                                 android:layout_width="0dp"
                                 android:layout_height="wrap_content"
                                 android:layout_marginEnd="@dimen/spacing_small"
-                                android:layout_weight="1.6"
+                                android:layout_weight="1.9"
                                 android:hint="@string/label_host"
                                 app:endIconMode="clear_text"
                                 app:placeholderText="@string/hint_host">
@@ -189,7 +191,6 @@
                                 android:layout_height="wrap_content"
                                 android:layout_weight="1"
                                 android:hint="@string/label_port"
-                                app:helperText="@string/scan_support"
                                 app:placeholderText="@string/hint_port">
 
                                 <com.google.android.material.textfield.TextInputEditText
@@ -209,6 +210,14 @@
                             android:layout_marginTop="@dimen/spacing_small"
                             android:text="@string/action_scan"
                             app:icon="@drawable/ic_search_24" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/scan_tip"
+                            android:textAppearance="?attr/textAppearanceBodySmall"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
 
                         <LinearLayout
                             android:layout_width="match_parent"
@@ -318,7 +327,7 @@
                                 android:layout_height="wrap_content"
                                 android:layout_marginStart="@dimen/spacing_small"
                                 android:gravity="end"
-                                android:minWidth="48dp"
+                                android:minWidth="56dp"
                                 android:text="1.0x"
                                 android:textAppearance="?attr/textAppearanceBodyLarge"
                                 android:textColor="?attr/colorPrimary" />
@@ -361,7 +370,8 @@
                                 android:id="@+id/audioCheck"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:checked="true" />
+                                android:checked="true"
+                                android:contentDescription="@string/setting_audio" />
                         </LinearLayout>
 
                         <LinearLayout
@@ -464,7 +474,8 @@
                                 android:id="@+id/previewSwitch"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:checked="true" />
+                                android:checked="true"
+                                android:contentDescription="@string/setting_preview" />
                         </LinearLayout>
 
                         <LinearLayout
@@ -502,7 +513,8 @@
                             <com.google.android.material.switchmaterial.SwitchMaterial
                                 android:id="@+id/dimSwitch"
                                 android:layout_width="wrap_content"
-                                android:layout_height="wrap_content" />
+                                android:layout_height="wrap_content"
+                                android:contentDescription="@string/setting_dim" />
                         </LinearLayout>
 
                         <LinearLayout
@@ -540,7 +552,8 @@
                             <com.google.android.material.switchmaterial.SwitchMaterial
                                 android:id="@+id/economySwitch"
                                 android:layout_width="wrap_content"
-                                android:layout_height="wrap_content" />
+                                android:layout_height="wrap_content"
+                                android:contentDescription="@string/setting_economy" />
                         </LinearLayout>
 
                         <com.google.android.material.button.MaterialButton

@@ -95,6 +95,20 @@ internal object SrtPorts {
         return first ?: 9998
     }
 
+    /**
+     * Completa o último octeto ("10" ou ".10") com o /24 do IPv4
+     * local ("192.168.0.20" + "10" vira "192.168.0.10"). IP cheio,
+     * nome, IPv6, octeto inválido ou sem IP local voltam como estão.
+     */
+    fun expandLastOctet(host: String, localIpv4: String?): String {
+        val t = host.trim()
+        val last = Regex("""^\.?(\d{1,3})$""").matchEntire(t)
+            ?.groupValues?.get(1)?.toIntOrNull()
+            ?.takeIf { it in 0..255 } ?: return t
+        val o = localIpv4?.let { parseIpv4(it) } ?: return t
+        return "${o[0]}.${o[1]}.${o[2]}.$last"
+    }
+
     /** Tira espaços e colchetes: "[fe80::1]" vira "fe80::1". */
     fun bareHost(host: String): String {
         val t = host.trim()
@@ -103,6 +117,20 @@ internal object SrtPorts {
         }
         return t
     }
+
+    /**
+     * URL SRT de discagem. A latência aqui vai em MILISSEGUNDOS, que
+     * é a unidade do parâmetro latency no SRT nativo (srtdroid lê
+     * como latencyInMs). NÃO multiplicar por 1000: microssegundos
+     * valem só no FFmpeg/OBS. O SRT negocia o maior valor entre os
+     * dois lados, então ?latency=120000 vira 120 s de buffer, com
+     * atraso gigante, memória estourada e vídeo travando. O valor é
+     * limitado a 20..5000 ms para um erro de digitação não derrubar
+     * a live (no app o campo é ms; no OBS o mesmo valor é µs).
+     */
+    fun callerSrtUrl(host: String, port: Int, latencyMs: Int): String =
+        "srt://${formatSrtHost(host)}:$port" +
+            "?latency=${latencyMs.coerceIn(20, 5000)}&connect_timeout=15000"
 
     /**
      * Host pronto para a URL SRT: IPv6 literal vai entre colchetes

@@ -10,15 +10,16 @@
     <string name="section_help">Como ligar no OBS</string>
 
     <string name="chip_live">AO VIVO</string>
+    <string name="chip_connecting">Conectando</string>
     <string name="chip_idle">Parado</string>
     <string name="status_stopped">Parado</string>
 
     <string name="label_host">IP do PC com OBS</string>
-    <string name="hint_host">Ex. 192.168.0.10</string>
+    <string name="hint_host">192.168.0.10 ou só 10</string>
     <string name="label_port">Porta</string>
-    <string name="hint_port">9998 ou 9900-9910</string>
-    <string name="label_latency">Latência SRT (ms)</string>
-    <string name="label_bitrate">Bitrate (Mbps)</string>
+    <string name="hint_port">9998</string>
+    <string name="label_latency">Latência SRT</string>
+    <string name="label_bitrate">Bitrate</string>
     <string name="label_quality">Qualidade</string>
     <string name="label_zoom">Zoom</string>
     <string name="desc_zoom">Ajustar zoom da câmera</string>
@@ -29,7 +30,7 @@
     <string name="action_cancel">Cancelar</string>
     <string name="action_switch_camera">Trocar câmera</string>
     <string name="action_scan">Procurar SRT</string>
-    <string name="scan_support">IP vazio varre a rede 9990-9999</string>
+    <string name="scan_tip">IP vazio varre a rede (9990-9999) • porta aceita faixa, ex. 9900-9910</string>
 
     <string name="setting_audio">Enviar áudio do microfone</string>
     <string name="setting_audio_desc">AAC mono 96 kbps junto com o vídeo</string>
@@ -52,5 +53,5 @@
 
     <string name="snackbar_background_stream">Transmitindo em 2º plano. Toque em Parar para encerrar.</string>
 
-    <string name="help_obs">No OBS: Fonte de Mídia, desmarque Arquivo local e em Entrada use srt://0.0.0.0:9998?mode=listener&amp;latency=120 (mesma porta e latência do app). Roda em pé ou deitado; a orientação trava durante a live. Pode apertar o botão de energia: com a live no ar, ela continua com a tela apagada.</string>
+    <string name="help_obs">No OBS: Fonte de Mídia, desmarque Arquivo local e em Entrada use:\nsrt://0.0.0.0:9998?mode=listener&amp;latency=120000\n(mesma porta do app; 120 ms = 120000 no OBS).\n\nRoda em pé ou deitado; a orientação trava na live. Pode apertar o botão de energia: a live continua com a tela apagada.</string>
 </resources>

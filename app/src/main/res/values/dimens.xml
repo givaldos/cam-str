@@ -4,4 +4,8 @@
     <dimen name="spacing_medium">16dp</dimen>
     <dimen name="card_corner">16dp</dimen>
     <dimen name="preview_height">220dp</dimen>
+    <!-- Deitado: preview menor para os controles caberem na altura.
+         Nome separado (não values-land): a atividade não recria no
+         giro (configChanges), então o land só vale via código. -->
+    <dimen name="preview_height_land">148dp</dimen>
 </resources>
